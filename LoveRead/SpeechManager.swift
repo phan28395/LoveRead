@@ -9,57 +9,69 @@ class SpeechManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     
     private var synthesizer = AVSpeechSynthesizer()
     
-    // UI State
     @Published var isSpeaking = false
     @Published var isPaused = false
-    @Published var rate: Float = 0.5
     
-    // TRACKING: The word currently being spoken (for highlighting)
-    @Published var currentRange: NSRange = NSRange(location: 0, length: 0)
-    
-    // Internal Memory
-    private var fullText: String = ""
-    private var offsetIndex: Int = 0 // Where did we start this specific sentence?
-    
-    override init() {
-        super.init()
-        synthesizer.delegate = self
-        #if os(iOS)
-        setupMobileAudio()
-        #endif
+    // PERSISTENCE 1: Speed
+    // We modify this so when you change it, it automatically saves to disk
+    @Published var rate: Float {
+        didSet {
+            UserDefaults.standard.set(rate, forKey: "saved_rate")
+        }
     }
     
-    #if os(iOS)
-    func setupMobileAudio() {
+    @Published var currentRange: NSRange = NSRange(location: 0, length: 0)
+    
+    private var fullText: String = ""
+    
+    // PERSISTENCE 2: Position
+    // We will load this from disk in init()
+    private var anchorIndex: Int = 0
+    
+    private var currentBufferOffset: Int = 0
+    
+    override init() {
+        // LOAD SAVED DATA
+        // If there is no saved rate, default to 0.5
+        let savedRate = UserDefaults.standard.float(forKey: "saved_rate")
+        self.rate = savedRate == 0 ? 0.5 : savedRate
+        
+        // Load the last known position
+        self.anchorIndex = UserDefaults.standard.integer(forKey: "saved_anchor")
+        
+        super.init()
+        synthesizer.delegate = self
+        
+        #if os(iOS)
         do {
             try AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio)
             try AVAudioSession.sharedInstance().setActive(true)
-        } catch {
-            print("Audio session error: \(error)")
-        }
+        } catch { print("Audio Error") }
+        #endif
     }
-    #endif
-    
-    // MARK: - Smart Controls
     
     func startSpeaking(text: String) {
-        // If we are starting fresh (new text), reset everything
+        // 1. Check if text changed.
+        // If the user pasted NEW text, we should reset the position to 0.
+        // If it's the SAME text (just reopening app), keep the saved position.
         if text != fullText {
             fullText = text
-            offsetIndex = 0
+            // Only reset anchor if the text is actually different
+            // (We assume if text length is drastically different, it's new)
+            // A simple check:
+            if abs(text.count - fullText.count) > 5 {
+               anchorIndex = 0
+            }
         }
         
-        // If we reached the end previously, reset
-        if offsetIndex >= fullText.count {
-            offsetIndex = 0
+        // Safety check for bounds
+        if anchorIndex >= fullText.count {
+            anchorIndex = 0
         }
         
-        // STOP any current audio so we can apply new settings (Speed/Voice)
         synthesizer.stopSpeaking(at: .immediate)
         
-        // Calculate the text to speak (Slice from the bookmark to the end)
-        let textToSpeak = String(fullText.dropFirst(offsetIndex))
-        
+        let textToSpeak = String(fullText.dropFirst(anchorIndex))
         if textToSpeak.isEmpty { return }
         
         let utterance = AVSpeechUtterance(string: textToSpeak)
@@ -68,58 +80,62 @@ class SpeechManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         utterance.volume = 1.0
         
         synthesizer.speak(utterance)
-        
         isSpeaking = true
         isPaused = false
     }
     
     func pauseSpeaking() {
-        // We use STOP here to allow speed changes.
-        // The 'offsetIndex' is already updated by the delegate below.
-        synthesizer.stopSpeaking(at: .immediate)
-        isSpeaking = false
+        // Save current spot
+        anchorIndex += currentBufferOffset
+        currentBufferOffset = 0
+        
+        // PERSISTENCE 3: Save to Disk immediately
+        UserDefaults.standard.set(anchorIndex, forKey: "saved_anchor")
+        
         isPaused = true
+        isSpeaking = false
+        synthesizer.stopSpeaking(at: .immediate)
     }
     
     func reset() {
         synthesizer.stopSpeaking(at: .immediate)
         isSpeaking = false
         isPaused = false
-        offsetIndex = 0
+        anchorIndex = 0
+        currentBufferOffset = 0
         currentRange = NSRange(location: 0, length: 0)
+        
+        // Clear saved position
+        UserDefaults.standard.set(0, forKey: "saved_anchor")
     }
     
-    // MARK: - The "GPS" (Delegate)
-    
-    // This runs automatically every time the voice speaks a new word
+    // MARK: - Delegate
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, willSpeakRangeOfSpeechString characterRange: NSRange, utterance: AVSpeechUtterance) {
         
-        // IMPORTANT MATH:
-        // 'characterRange' is relative to the *snippet* we are currently speaking.
-        // 'offsetIndex' is where that snippet started in the *full text*.
-        // We add them together to get the "Global Position" for highlighting.
+        let globalLocation = anchorIndex + characterRange.location
         
-        let globalLocation = offsetIndex + characterRange.location
-        
-        // Update the UI
         DispatchQueue.main.async {
             self.currentRange = NSRange(location: globalLocation, length: characterRange.length)
         }
         
-        // Update our bookmark so if we pause NOW, we know where to resume
-        // We save the START of the current word as the resume point
-        // (If you want to be safer, add characterRange.length to skip this word on resume)
-        self.offsetIndex = globalLocation
+        self.currentBufferOffset = characterRange.location
     }
     
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
-        DispatchQueue.main.async {
-            // Only reset if we truly finished the whole text
-            if self.offsetIndex >= self.fullText.count - 1 {
+        if isPaused { return }
+        
+        let finishedLocation = anchorIndex + utterance.speechString.count
+        
+        if finishedLocation >= fullText.count - 5 {
+            DispatchQueue.main.async {
                 self.isSpeaking = false
                 self.isPaused = false
-                self.offsetIndex = 0
+                self.anchorIndex = 0
+                self.currentBufferOffset = 0
                 self.currentRange = NSRange(location: 0, length: 0)
+                
+                // Clear saved position when finished
+                UserDefaults.standard.set(0, forKey: "saved_anchor")
             }
         }
     }
