@@ -72,6 +72,34 @@ struct PDFViewerView: UIViewRepresentable {
 
         init(onPositionChange: @escaping (PDFReadingPosition) -> Void) {
             self.onPositionChange = onPositionChange
+            super.init()
+
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(applicationWillResignActive),
+                name: UIApplication.willResignActiveNotification,
+                object: nil
+            )
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(applicationWillTerminate),
+                name: UIApplication.willTerminateNotification,
+                object: nil
+            )
+        }
+
+        @objc private func applicationWillResignActive() {
+            flushImmediately()
+        }
+
+        @objc private func applicationWillTerminate() {
+            flushImmediately()
+        }
+
+        private func flushImmediately() {
+            pendingSaveWorkItem?.cancel()
+            pendingSaveWorkItem = nil
+            flushLastKnownPosition()
         }
 
         fileprivate func bind(to view: PDFView) {
@@ -135,14 +163,15 @@ struct PDFViewerView: UIViewRepresentable {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: workItem)
         }
 
-        fileprivate func savePositionNow() {
+        @discardableResult
+        fileprivate func savePositionNow() -> Bool {
             guard
                 let pdfView,
                 let document = pdfView.document
-            else { return }
+            else { return false }
 
-            guard pdfView.window != nil else { return }
-            guard pdfView.bounds.width > 1, pdfView.bounds.height > 1 else { return }
+            guard pdfView.window != nil else { return false }
+            guard pdfView.bounds.width > 1, pdfView.bounds.height > 1 else { return false }
 
             let anchorInsetY = min(80, max(16, pdfView.bounds.height * 0.25))
             let anchorPointInView = CGPoint(x: pdfView.bounds.midX, y: pdfView.bounds.minY + anchorInsetY)
@@ -166,16 +195,30 @@ struct PDFViewerView: UIViewRepresentable {
                 probePoint = anchorPointInView
             }
 
-            guard let page else { return }
+            guard let page else { return false }
             let pageIndex = document.index(for: page)
 
             let pagePoint = pdfView.convert(probePoint, to: page)
             let pageBounds = page.bounds(for: pdfView.displayBox)
             let clampedY = min(max(pagePoint.y, pageBounds.minY), pageBounds.maxY)
 
-            let position = PDFReadingPosition(pageIndex: pageIndex, x: nil, y: Double(clampedY))
+            let pageHeight = pageBounds.height
+            let progressFromTop: Double? = {
+                guard pageHeight > 0 else { return nil }
+                let progress = (pageBounds.maxY - clampedY) / pageHeight
+                return Double(min(max(progress, 0), 1))
+            }()
+
+            let position = PDFReadingPosition(
+                pageIndex: pageIndex,
+                x: nil,
+                y: Double(clampedY),
+                progressFromTop: progressFromTop,
+                textScrollAnchor: nil
+            )
             lastKnownPosition = position
             onPositionChange(position)
+            return true
         }
 
         private func restoreIsComplete() -> Bool {
@@ -193,6 +236,7 @@ struct PDFViewerView: UIViewRepresentable {
         }
 
         fileprivate func flushLastKnownPosition() {
+            if savePositionNow() { return }
             guard let lastKnownPosition else { return }
             onPositionChange(lastKnownPosition)
         }
@@ -283,11 +327,19 @@ struct PDFViewerView: UIViewRepresentable {
             guard let page = document.page(at: clampedIndex) else { return }
 
             DispatchQueue.main.async {
+                let pageBounds = page.bounds(for: view.displayBox)
                 if let point = position.destinationPoint(unspecifiedValue: kPDFDestinationUnspecifiedValue) {
                     let destination = PDFDestination(page: page, at: point)
                     view.go(to: destination)
+                } else if let progressFromTop = position.progressFromTop {
+                    let clampedProgress = min(max(progressFromTop, 0), 1)
+                    let y = pageBounds.maxY - (CGFloat(clampedProgress) * pageBounds.height)
+                    let destination = PDFDestination(
+                        page: page,
+                        at: CGPoint(x: kPDFDestinationUnspecifiedValue, y: y)
+                    )
+                    view.go(to: destination)
                 } else {
-                    let pageBounds = page.bounds(for: view.displayBox)
                     let topDestination = PDFDestination(
                         page: page,
                         at: CGPoint(x: kPDFDestinationUnspecifiedValue, y: pageBounds.maxY)
@@ -315,6 +367,9 @@ struct PDFViewerView: UIViewRepresentable {
             if let pdfView {
                 NotificationCenter.default.removeObserver(self, name: Notification.Name.PDFViewPageChanged, object: pdfView)
             }
+
+            NotificationCenter.default.removeObserver(self, name: UIApplication.willResignActiveNotification, object: nil)
+            NotificationCenter.default.removeObserver(self, name: UIApplication.willTerminateNotification, object: nil)
         }
 
         deinit {

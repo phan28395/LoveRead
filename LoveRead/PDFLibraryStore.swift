@@ -37,6 +37,7 @@ final class PDFLibraryStore: ObservableObject {
             if fileManager.fileExists(atPath: fileURL.path) {
                 try fileManager.removeItem(at: fileURL)
             }
+            PDFTextExtractor.removeCachedPages(for: item.id)
 
             items.removeAll { $0.id == item.id }
             try save()

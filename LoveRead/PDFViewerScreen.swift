@@ -6,6 +6,7 @@ import UIKit
 
 struct PDFViewerScreen: View {
     @EnvironmentObject private var library: PDFLibraryStore
+    @Environment(\.scenePhase) private var scenePhase
 
     let item: PDFItem
 
@@ -25,6 +26,7 @@ struct PDFViewerScreen: View {
     @StateObject private var speechManager = SpeechManager(anchorDefaultsKey: nil)
     @State private var speechPageIndex: Int?
     @State private var speechText: String = ""
+    @State private var lastKnownPosition: PDFReadingPosition?
 
     var body: some View {
         if let url = try? library.url(for: item) {
@@ -74,6 +76,7 @@ struct PDFViewerScreen: View {
                 let saved = library.savedPosition(for: item.id)
                 currentPageIndex = saved?.pageIndex ?? library.savedPageIndex(for: item.id)
                 scrollToPageIndex = currentPageIndex
+                lastKnownPosition = saved ?? PDFReadingPosition(pageIndex: currentPageIndex, x: nil, y: nil)
                 speechPageIndex = nil
                 speechText = ""
             }
@@ -82,6 +85,14 @@ struct PDFViewerScreen: View {
                     scrollToPageIndex = currentPageIndex
                     Task { _ = await ensureTextLoaded(from: url) }
                 }
+            }
+            .onChange(of: scenePhase) { _, newPhase in
+                if newPhase == .background || newPhase == .inactive {
+                    flushLastKnownPosition()
+                }
+            }
+            .onDisappear {
+                flushLastKnownPosition()
             }
             .alert("Couldn’t convert PDF", isPresented: Binding(
                 get: { extractionErrorMessage != nil },
@@ -103,7 +114,8 @@ struct PDFViewerScreen: View {
     }
 
     private func pdfView(url: URL) -> some View {
-        let initialPosition = library.savedPosition(for: item.id)
+        let initialPosition = lastKnownPosition
+            ?? library.savedPosition(for: item.id)
             ?? PDFReadingPosition(pageIndex: library.savedPageIndex(for: item.id), x: nil, y: nil)
 
         return PDFViewerView(
@@ -111,6 +123,7 @@ struct PDFViewerScreen: View {
             initialPosition: initialPosition,
             onPositionChange: { position in
                 library.savePosition(position, for: item.id)
+                lastKnownPosition = position
                 if position.pageIndex != currentPageIndex {
                     currentPageIndex = position.pageIndex
                 }
@@ -134,9 +147,10 @@ struct PDFViewerScreen: View {
                 pageTexts: pageTexts,
                 currentPageIndex: $currentPageIndex,
                 scrollToPageIndex: $scrollToPageIndex,
-                onPageIndexChange: { newIndex in
-                    scrollToPageIndex = newIndex
-                    library.savePosition(PDFReadingPosition(pageIndex: newIndex, x: nil, y: nil), for: item.id)
+                livePosition: $lastKnownPosition,
+                onPositionChange: { position in
+                    library.savePosition(position, for: item.id)
+                    lastKnownPosition = position
                 },
                 karaokePageIndex: speechPageIndex,
                 karaokeRange: speechManager.currentRange,
@@ -169,8 +183,9 @@ struct PDFViewerScreen: View {
         extractionErrorMessage = nil
 
         do {
+            let cacheID = item.id
             let pages = try await Task.detached(priority: .userInitiated) {
-                try PDFTextExtractor.extractPages(from: url)
+                try PDFTextExtractor.extractPages(from: url, cacheID: cacheID)
             }.value
 
             let hasAnyText = pages.contains { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
@@ -235,5 +250,10 @@ struct PDFViewerScreen: View {
 
     private var isKaraokeActive: Bool {
         speechManager.isSpeaking || speechManager.isPaused
+    }
+
+    private func flushLastKnownPosition() {
+        guard let lastKnownPosition else { return }
+        library.savePosition(lastKnownPosition, for: item.id)
     }
 }
