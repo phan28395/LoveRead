@@ -4,7 +4,7 @@ import SwiftUI
 struct LoveReadApp: App {
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            RootView()
         }
     }
 }

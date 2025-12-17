@@ -2,7 +2,7 @@ import SwiftUI
 
 struct ContentView: View {
     @StateObject private var speechManager = SpeechManager()
-    @State private var textInput: String = "Welcome to the advanced reader. Paste your text here. When you press Read, I will highlight the words as I speak them. You can pause, change speed, and resume instantly."
+    @Binding var textInput: String
     
     // Controls if we are typing or listening
     @State private var isReaderMode = false
@@ -157,5 +157,5 @@ extension View {
 #endif
 
 #Preview {
-    ContentView()
+    ContentView(textInput: .constant(AppState.defaultReaderText))
 }
