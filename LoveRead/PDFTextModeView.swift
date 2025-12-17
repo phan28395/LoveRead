@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 
 struct PDFTextModeView: View {
@@ -5,8 +6,12 @@ struct PDFTextModeView: View {
     @Binding var currentPageIndex: Int
     @Binding var scrollToPageIndex: Int
     let onPageIndexChange: (Int) -> Void
+    var karaokePageIndex: Int?
+    var karaokeRange: NSRange = NSRange(location: 0, length: 0)
+    var isKaraokeActive: Bool = false
 
     @State private var isProgrammaticScroll = false
+    @State private var scrollViewportHeight: CGFloat = 0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -45,15 +50,22 @@ struct PDFTextModeView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 16) {
                         ForEach(pageTexts.indices, id: \.self) { index in
+                            let pageText = pageTexts[index]
                             VStack(alignment: .leading, spacing: 8) {
                                 Text("Page \(index + 1)")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                     .monospacedDigit()
 
-                                Text(displayText(for: index))
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .textSelection(.enabled)
+                                if isKaraokeActive, karaokePageIndex == index, !pageText.isEmpty {
+                                    Text(KaraokeTextBuilder.attributedString(for: pageText, highlightRange: karaokeRange))
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .textSelection(.enabled)
+                                } else {
+                                    Text(pageText.isEmpty ? "No selectable text found on this page." : pageText)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .textSelection(.enabled)
+                                }
                             }
                             .padding(.horizontal)
                             .id(index)
@@ -63,6 +75,21 @@ struct PDFTextModeView: View {
                     .padding(.vertical, 16)
                 }
                 .coordinateSpace(name: "PDFTextScroll")
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 1)
+                        .onChanged { _ in
+                            isProgrammaticScroll = false
+                        }
+                )
+                .background(
+                    GeometryReader { proxy in
+                        Color.clear
+                            .onAppear { scrollViewportHeight = proxy.size.height }
+                            .onChange(of: proxy.size.height) { _, newValue in
+                                scrollViewportHeight = newValue
+                            }
+                    }
+                )
                 .onAppear {
                     scroll(proxy: proxy, to: scrollToPageIndex, animated: false)
                 }
@@ -70,7 +97,13 @@ struct PDFTextModeView: View {
                     scroll(proxy: proxy, to: newValue, animated: true)
                 }
                 .onPreferenceChange(PageOffsetPreferenceKey.self) { offsets in
-                    guard !isProgrammaticScroll else { return }
+                    if isProgrammaticScroll {
+                        if let visibleIndex = computeVisiblePage(from: offsets), visibleIndex == scrollToPageIndex {
+                            isProgrammaticScroll = false
+                        }
+                        return
+                    }
+
                     guard let visibleIndex = computeVisiblePage(from: offsets) else { return }
                     if visibleIndex != currentPageIndex {
                         currentPageIndex = visibleIndex
@@ -89,32 +122,31 @@ struct PDFTextModeView: View {
         onPageIndexChange(clamped)
     }
 
-    private func displayText(for index: Int) -> String {
-        let trimmed = pageTexts[index].trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? "No selectable text found on this page." : trimmed
-    }
-
     private func scroll(proxy: ScrollViewProxy, to index: Int, animated: Bool) {
         guard !pageTexts.isEmpty else { return }
         let clamped = max(0, min(index, pageTexts.count - 1))
 
         isProgrammaticScroll = true
-        if animated {
-            withAnimation(.easeInOut(duration: 0.25)) {
+        DispatchQueue.main.async {
+            if animated {
+                withAnimation(.easeInOut(duration: 0.25)) {
+                    proxy.scrollTo(clamped, anchor: .top)
+                }
+            } else {
                 proxy.scrollTo(clamped, anchor: .top)
             }
-        } else {
-            proxy.scrollTo(clamped, anchor: .top)
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-            isProgrammaticScroll = false
         }
     }
 
     private func computeVisiblePage(from offsets: [Int: CGFloat]) -> Int? {
         guard !offsets.isEmpty else { return nil }
 
-        let threshold: CGFloat = 120
+        let threshold: CGFloat = {
+            if scrollViewportHeight > 0 {
+                return min(80, max(16, scrollViewportHeight * 0.25))
+            }
+            return 80
+        }()
         let nearTop = offsets.filter { $0.value <= threshold }
         if let best = nearTop.max(by: { $0.value < $1.value }) {
             return best.key
@@ -153,7 +185,9 @@ private struct PageOffsetReporter: View {
         ],
         currentPageIndex: .constant(0),
         scrollToPageIndex: .constant(0),
-        onPageIndexChange: { _ in }
+        onPageIndexChange: { _ in },
+        karaokePageIndex: 0,
+        karaokeRange: NSRange(location: 6, length: 5),
+        isKaraokeActive: true
     )
 }
-

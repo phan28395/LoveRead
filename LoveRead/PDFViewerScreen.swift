@@ -5,7 +5,6 @@ import UIKit
 #endif
 
 struct PDFViewerScreen: View {
-    @EnvironmentObject private var appState: AppState
     @EnvironmentObject private var library: PDFLibraryStore
 
     let item: PDFItem
@@ -23,6 +22,9 @@ struct PDFViewerScreen: View {
     @State private var isExtracting = false
     @State private var extractionErrorMessage: String?
     @State private var isSharing = false
+    @StateObject private var speechManager = SpeechManager(anchorDefaultsKey: nil)
+    @State private var speechPageIndex: Int?
+    @State private var speechText: String = ""
 
     var body: some View {
         if let url = try? library.url(for: item) {
@@ -42,6 +44,13 @@ struct PDFViewerScreen: View {
                 case .text:
                     textView(url: url)
                 }
+
+                SpeechControlBar(
+                    speechManager: speechManager,
+                    isBusy: isExtracting && !speechManager.isSpeaking,
+                    onPlayPause: { toggleSpeech(from: url) },
+                    onReset: resetSpeech
+                )
             }
             .navigationTitle(item.displayName)
             .navigationBarTitleDisplayMode(.inline)
@@ -50,7 +59,6 @@ struct PDFViewerScreen: View {
                     if mode == .text, !pageTexts.isEmpty {
                         Button("Copy Page") { copyCurrentPage() }
                         Button("Share") { isSharing = true }
-                        Button("Open in Reader") { openCurrentPageInReader() }
                     }
                 }
             }
@@ -66,11 +74,13 @@ struct PDFViewerScreen: View {
                 let saved = library.savedPosition(for: item.id)
                 currentPageIndex = saved?.pageIndex ?? library.savedPageIndex(for: item.id)
                 scrollToPageIndex = currentPageIndex
+                speechPageIndex = nil
+                speechText = ""
             }
             .onChange(of: mode) { _, newMode in
                 if newMode == .text {
                     scrollToPageIndex = currentPageIndex
-                    ensureTextLoaded(from: url)
+                    Task { _ = await ensureTextLoaded(from: url) }
                 }
             }
             .alert("Couldn’t convert PDF", isPresented: Binding(
@@ -107,7 +117,10 @@ struct PDFViewerScreen: View {
                 if position.pageIndex != scrollToPageIndex {
                     scrollToPageIndex = position.pageIndex
                 }
-            }
+            },
+            highlightPageIndex: (isKaraokeActive ? speechPageIndex : nil),
+            highlightRange: (isKaraokeActive ? speechManager.currentRange : nil),
+            scrollToHighlight: speechManager.isSpeaking
         )
     }
 
@@ -124,7 +137,10 @@ struct PDFViewerScreen: View {
                 onPageIndexChange: { newIndex in
                     scrollToPageIndex = newIndex
                     library.savePosition(PDFReadingPosition(pageIndex: newIndex, x: nil, y: nil), for: item.id)
-                }
+                },
+                karaokePageIndex: speechPageIndex,
+                karaokeRange: speechManager.currentRange,
+                isKaraokeActive: isKaraokeActive
             )
         } else {
             ContentUnavailableView(
@@ -135,7 +151,7 @@ struct PDFViewerScreen: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .overlay(alignment: .bottom) {
                 Button(isExtracting ? "Converting…" : "Convert") {
-                    ensureTextLoaded(from: url)
+                    Task { _ = await ensureTextLoaded(from: url) }
                 }
                 .buttonStyle(.borderedProminent)
                 .padding()
@@ -144,30 +160,30 @@ struct PDFViewerScreen: View {
         }
     }
 
-    private func ensureTextLoaded(from url: URL) {
-        guard !isExtracting else { return }
-        guard pageTexts.isEmpty else { return }
+    @MainActor
+    private func ensureTextLoaded(from url: URL) async -> Bool {
+        if !pageTexts.isEmpty { return true }
+        if isExtracting { return false }
 
         isExtracting = true
         extractionErrorMessage = nil
 
-        Task.detached(priority: .userInitiated) {
-            do {
-                let pages = try PDFTextExtractor.extractPages(from: url)
-                let hasAnyText = pages.contains { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-                await MainActor.run {
-                    self.pageTexts = pages
-                    self.isExtracting = false
-                    if !hasAnyText {
-                        self.extractionErrorMessage = "No selectable text found in this PDF (it may be scanned)."
-                    }
-                }
-            } catch {
-                await MainActor.run {
-                    self.isExtracting = false
-                    self.extractionErrorMessage = (error as NSError).localizedDescription
-                }
+        do {
+            let pages = try await Task.detached(priority: .userInitiated) {
+                try PDFTextExtractor.extractPages(from: url)
+            }.value
+
+            let hasAnyText = pages.contains { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            pageTexts = pages
+            isExtracting = false
+            if !hasAnyText {
+                extractionErrorMessage = "No selectable text found in this PDF (it may be scanned)."
             }
+            return hasAnyText
+        } catch {
+            isExtracting = false
+            extractionErrorMessage = (error as NSError).localizedDescription
+            return false
         }
     }
 
@@ -182,15 +198,42 @@ struct PDFViewerScreen: View {
         #endif
     }
 
-    private func openCurrentPageInReader() {
-        if pageTexts.isEmpty {
-            appState.readerText = ""
-        } else {
-            let textFromHere = pageTexts[currentPageIndex...]
-                .joined(separator: "\n\n")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            appState.readerText = textFromHere
+    private func toggleSpeech(from url: URL) {
+        if speechManager.isSpeaking {
+            speechManager.pauseSpeaking()
+            return
         }
-        appState.selectedTab = .reader
+
+        Task { @MainActor in
+            if speechManager.isPaused, speechPageIndex == currentPageIndex, !speechText.isEmpty {
+                speechManager.startSpeaking(text: speechText)
+                return
+            }
+
+            speechManager.reset()
+
+            guard await ensureTextLoaded(from: url) else { return }
+            guard currentPageIndex >= 0, currentPageIndex < pageTexts.count else { return }
+
+            let pageText = pageTexts[currentPageIndex]
+            if pageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                extractionErrorMessage = "No selectable text found on this page."
+                return
+            }
+
+            speechPageIndex = currentPageIndex
+            speechText = pageText
+            speechManager.startSpeaking(text: pageText)
+        }
+    }
+
+    private func resetSpeech() {
+        speechManager.reset()
+        speechPageIndex = nil
+        speechText = ""
+    }
+
+    private var isKaraokeActive: Bool {
+        speechManager.isSpeaking || speechManager.isPaused
     }
 }

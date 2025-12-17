@@ -12,11 +12,15 @@ class SpeechManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     @Published var isSpeaking = false
     @Published var isPaused = false
     
+    private let rateDefaultsKey: String
+    private let anchorDefaultsKey: String?
+    private let textSignatureDefaultsKey: String?
+
     // PERSISTENCE 1: Speed
     // We modify this so when you change it, it automatically saves to disk
     @Published var rate: Float {
         didSet {
-            UserDefaults.standard.set(rate, forKey: "saved_rate")
+            UserDefaults.standard.set(rate, forKey: rateDefaultsKey)
         }
     }
     
@@ -27,17 +31,33 @@ class SpeechManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     // PERSISTENCE 2: Position
     // We will load this from disk in init()
     private var anchorIndex: Int = 0
+    private var currentTextSignature: String?
     
     private var currentBufferOffset: Int = 0
     
-    override init() {
+    init(rateDefaultsKey: String = "saved_rate", anchorDefaultsKey: String? = "saved_anchor") {
+        self.rateDefaultsKey = rateDefaultsKey
+        self.anchorDefaultsKey = anchorDefaultsKey
+        if let anchorDefaultsKey {
+            self.textSignatureDefaultsKey = "\(anchorDefaultsKey)_text_signature"
+        } else {
+            self.textSignatureDefaultsKey = nil
+        }
+
         // LOAD SAVED DATA
         // If there is no saved rate, default to 0.5
-        let savedRate = UserDefaults.standard.float(forKey: "saved_rate")
+        let savedRate = UserDefaults.standard.float(forKey: rateDefaultsKey)
         self.rate = savedRate == 0 ? 0.5 : savedRate
         
         // Load the last known position
-        self.anchorIndex = UserDefaults.standard.integer(forKey: "saved_anchor")
+        if let anchorDefaultsKey {
+            self.anchorIndex = UserDefaults.standard.integer(forKey: anchorDefaultsKey)
+        } else {
+            self.anchorIndex = 0
+        }
+        if let textSignatureDefaultsKey {
+            self.currentTextSignature = UserDefaults.standard.string(forKey: textSignatureDefaultsKey)
+        }
         
         super.init()
         synthesizer.delegate = self
@@ -51,18 +71,20 @@ class SpeechManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     }
     
     func startSpeaking(text: String) {
-        // 1. Check if text changed.
-        // If the user pasted NEW text, we should reset the position to 0.
-        // If it's the SAME text (just reopening app), keep the saved position.
-        if text != fullText {
-            fullText = text
-            // Only reset anchor if the text is actually different
-            // (We assume if text length is drastically different, it's new)
-            // A simple check:
-            if abs(text.count - fullText.count) > 5 {
-               anchorIndex = 0
+        let signature = Self.textSignature(for: text)
+        if signature != currentTextSignature {
+            anchorIndex = 0
+            currentBufferOffset = 0
+            currentRange = NSRange(location: 0, length: 0)
+            currentTextSignature = signature
+            if let textSignatureDefaultsKey {
+                UserDefaults.standard.set(signature, forKey: textSignatureDefaultsKey)
+            }
+            if let anchorDefaultsKey {
+                UserDefaults.standard.set(0, forKey: anchorDefaultsKey)
             }
         }
+        fullText = text
         
         // Safety check for bounds
         if anchorIndex >= fullText.count {
@@ -90,7 +112,9 @@ class SpeechManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         currentBufferOffset = 0
         
         // PERSISTENCE 3: Save to Disk immediately
-        UserDefaults.standard.set(anchorIndex, forKey: "saved_anchor")
+        if let anchorDefaultsKey {
+            UserDefaults.standard.set(anchorIndex, forKey: anchorDefaultsKey)
+        }
         
         isPaused = true
         isSpeaking = false
@@ -106,7 +130,9 @@ class SpeechManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         currentRange = NSRange(location: 0, length: 0)
         
         // Clear saved position
-        UserDefaults.standard.set(0, forKey: "saved_anchor")
+        if let anchorDefaultsKey {
+            UserDefaults.standard.set(0, forKey: anchorDefaultsKey)
+        }
     }
     
     // MARK: - Delegate
@@ -135,8 +161,16 @@ class SpeechManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
                 self.currentRange = NSRange(location: 0, length: 0)
                 
                 // Clear saved position when finished
-                UserDefaults.standard.set(0, forKey: "saved_anchor")
+                if let anchorDefaultsKey = self.anchorDefaultsKey {
+                    UserDefaults.standard.set(0, forKey: anchorDefaultsKey)
+                }
             }
         }
+    }
+
+    private static func textSignature(for text: String) -> String {
+        let prefix = String(text.prefix(128))
+        let suffix = String(text.suffix(128))
+        return "\(text.count)|\(prefix)|\(suffix)"
     }
 }

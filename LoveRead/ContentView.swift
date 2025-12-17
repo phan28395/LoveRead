@@ -124,27 +124,7 @@ struct ContentView: View {
     // MARK: - Helper to Colorize Text
     // This creates the "Karaoke" effect using AttributedString
     func buildHighlightedString() -> AttributedString {
-        var attributed = AttributedString(textInput)
-        
-        // 1. Get the range from SpeechManager
-        let range = speechManager.currentRange
-        
-        // 2. Ensure range is valid
-        if range.location != NSNotFound,
-           range.location + range.length <= textInput.count {
-            
-            // 3. Find the Swift String Index (complicated math simplified here)
-            let start = attributed.index(attributed.startIndex, offsetByCharacters: range.location)
-            let end = attributed.index(start, offsetByCharacters: range.length)
-            
-            // 4. Color that slice BLUE and BOLD
-            let slice = start..<end
-            attributed[slice].foregroundColor = .white // Text color inside highlight
-            attributed[slice].backgroundColor = .blue  // Highlight background
-            attributed[slice].font = .body.bold()
-        }
-        
-        return attributed
+        KaraokeTextBuilder.attributedString(for: textInput, highlightRange: speechManager.currentRange)
     }
 }
 

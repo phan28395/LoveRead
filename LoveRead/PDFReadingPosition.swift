@@ -18,8 +18,14 @@ struct PDFReadingPosition: Codable, Hashable {
         self.y = y
     }
 
-    var point: CGPoint? {
-        guard let x, let y else { return nil }
-        return CGPoint(x: x, y: y)
+    var hasDestinationPoint: Bool {
+        x != nil || y != nil
+    }
+
+    func destinationPoint(unspecifiedValue: CGFloat) -> CGPoint? {
+        guard hasDestinationPoint else { return nil }
+        let xValue = x.map { CGFloat($0) } ?? unspecifiedValue
+        let yValue = y.map { CGFloat($0) } ?? unspecifiedValue
+        return CGPoint(x: xValue, y: yValue)
     }
 }
